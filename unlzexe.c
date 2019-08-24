@@ -1,25 +1,62 @@
-/* unlzexe.c
+#define VERSION "0.8"
+/*
 * unlzexe ver 0.5 (PC-VAN UTJ44266 Kou )
 *   UNLZEXE converts the compressed file by lzexe(ver.0.90,0.91) to the
 *   UNcompressed executable one.
 *
 *   usage:  UNLZEXE packedfile[.EXE] [unpackedfile.EXE]
+
+v0.6  David Kirschbaum, Toad Hall, kirsch@usasoc.soc.mil, Jul 91
+	Problem reported by T.Salmi (ts@uwasa.fi) with UNLZEXE when run
+	with TLB-V119 on 386's.
+	Stripping out the iskanji and isjapan() stuff (which uses a somewhat
+	unusual DOS interrupt) to see if that's what's biting us.
+
+--  Found it, thanks to Dan Lewis (DLEWIS@SCUACC.SCU.EDU).
+	Silly us:  didn't notice the "r.h.al=0x3800;" in isjapan().
+	Oh, you don't see it either?  INT functions are called with AH
+	having the service.  Changing to "r.x.ax=0x3800;".
+
+v0.7  Alan Modra, amodra@sirius.ucs.adelaide.edu.au, Nov 91
+    Fixed problem with large files by casting ihead components to long
+    in various expressions.
+    Fixed MinBSS & MaxBSS calculation (ohead[5], ohead[6]).  Now UNLZEXE
+    followed by LZEXE should give the original file.
+
+v0.8  Vesselin Bontchev, bontchev@fbihh.informatik.uni-hamburg.de, Aug 92
+    Fixed recognition of EXE files - both 'MZ' and 'ZM' in the header
+    are recognized.
+    Recognition of compressed files made more robust - now just
+    patching the 'LZ90' and 'LZ91' strings will not fool the program.
 */
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
-#define FAILURE 1
-#define SUCCESS 0
-
+#ifdef __TURBOC__
+#include <dos.h>
+#include <dir.h>
+/*
+#define MAXPATH   80
+#define MAXDRIVE  3
+#define MAXDIR	  66
+#define MAXFILE   9
+#define MAXEXT	  5
+#define FILENAME_MAX MAXPATH
+*/
+#else
+#include <stdint.h>
 typedef uint16_t WORD;
 typedef uint8_t BYTE;
 #define stricmp strcasecmp
+#endif
+
+#define FAILURE 1
+#define SUCCESS 0
 
 int isjapan(void);
 int japan_f;
-#define	iskanji(c)	('\x81'<=(c)&&(c)<='\x9f' || '\xe0'<=(c)&&(c)<='\xfc')
+#define iskanji(c)	('\x81'<=(c)&&(c)<='\x9f' || '\xe0'<=(c)&&(c)<='\xfc')
 
 char *tmpfname = "$tmpfil$.exe";
 char *backup_ext = ".olz";
@@ -33,14 +70,14 @@ int rdhead(FILE *,int *);
 int mkreltbl(FILE *,FILE *,int);
 int unpack(FILE *,FILE *);
 void wrhead(FILE *);
-int reloc90();
-int reloc91();
+int reloc90(FILE *ifile,FILE *ofile,long fpos);
+int reloc91(FILE *ifile,FILE *ofile,long fpos);
 
 int main(int argc,char **argv){
     FILE *ifile,*ofile;
     int  ver,rename_sw=0;
 
-    printf("UNLZEXE Ver. 0.5\n");
+    printf("UNLZEXE Ver. "VERSION"\n");             /* v0.6 */
     japan_f=isjapan();
     if(argc!=3 && argc!=2){
         printf("usage: UNLZEXE packedfile [unpackedfile]\n");
@@ -64,11 +101,7 @@ int main(int argc,char **argv){
         printf("can't open '%s'.\n",opath);
         fclose(ifile); exit(EXIT_FAILURE);
     }
-    printf("file '%s' is compressed by LZEXE Ver. ",ipath);
-    switch(ver){
-    case 90: printf("0.90\n"); break;
-    case 91: printf("0.91\n"); break;
-    }
+    printf("file '%s' is compressed by LZEXE Ver. 0.%d\n",ipath,ver); /* v0.8 */
     if(mkreltbl(ifile,ofile,ver)!=SUCCESS) {
         fclose(ifile);
         fclose(ofile);
@@ -160,18 +193,20 @@ int fnamechg(char *ipath,char *opath,char *ofname,int rename_sw) {
 }
 
 int isjapan() {
-/*
+#ifdef __TURBOC__
     union REGS r;
     struct SREGS rs;
     BYTE buf[34];
 
     segread(&rs);
     rs.ds=rs.ss;  r.x.dx=(WORD)buf;
-    r.h.al=0x3800;
+/*	r.h.al=0x3800; v0.6 */
+	r.x.ax=0x3800;		/* svc 38H, check for country v0.6 */
     intdosx(&r,&r,&rs);
-    return(!strcmp(buf+2,"\\"));
-*/
+    return (! strcmp ((char *) (buf + 2), "\\"));       /* v0.8 */
+#else
     return 0;
+#endif
 }
 
 void parsepath(char *pathname, int *fname, int *ext) {
@@ -195,22 +230,104 @@ void parsepath(char *pathname, int *fname, int *ext) {
 }
 /*-------------------------------------------*/
 static WORD ihead[0x10],ohead[0x10],inf[8];
-static WORD allocsize;
 static long loadsize;
+static BYTE sig90 [] = {			/* v0.8 */
+    0x06, 0x0E, 0x1F, 0x8B, 0x0E, 0x0C, 0x00, 0x8B,
+    0xF1, 0x4E, 0x89, 0xF7, 0x8C, 0xDB, 0x03, 0x1E,
+    0x0A, 0x00, 0x8E, 0xC3, 0xB4, 0x00, 0x31, 0xED,
+    0xFD, 0xAC, 0x01, 0xC5, 0xAA, 0xE2, 0xFA, 0x8B,
+    0x16, 0x0E, 0x00, 0x8A, 0xC2, 0x29, 0xC5, 0x8A,
+    0xC6, 0x29, 0xC5, 0x39, 0xD5, 0x74, 0x0C, 0xBA,
+    0x91, 0x01, 0xB4, 0x09, 0xCD, 0x21, 0xB8, 0xFF,
+    0x4C, 0xCD, 0x21, 0x53, 0xB8, 0x53, 0x00, 0x50,
+    0xCB, 0x2E, 0x8B, 0x2E, 0x08, 0x00, 0x8C, 0xDA,
+    0x89, 0xE8, 0x3D, 0x00, 0x10, 0x76, 0x03, 0xB8,
+    0x00, 0x10, 0x29, 0xC5, 0x29, 0xC2, 0x29, 0xC3,
+    0x8E, 0xDA, 0x8E, 0xC3, 0xB1, 0x03, 0xD3, 0xE0,
+    0x89, 0xC1, 0xD1, 0xE0, 0x48, 0x48, 0x8B, 0xF0,
+    0x8B, 0xF8, 0xF3, 0xA5, 0x09, 0xED, 0x75, 0xD8,
+    0xFC, 0x8E, 0xC2, 0x8E, 0xDB, 0x31, 0xF6, 0x31,
+    0xFF, 0xBA, 0x10, 0x00, 0xAD, 0x89, 0xC5, 0xD1,
+    0xED, 0x4A, 0x75, 0x05, 0xAD, 0x89, 0xC5, 0xB2,
+    0x10, 0x73, 0x03, 0xA4, 0xEB, 0xF1, 0x31, 0xC9,
+    0xD1, 0xED, 0x4A, 0x75, 0x05, 0xAD, 0x89, 0xC5,
+    0xB2, 0x10, 0x72, 0x22, 0xD1, 0xED, 0x4A, 0x75,
+    0x05, 0xAD, 0x89, 0xC5, 0xB2, 0x10, 0xD1, 0xD1,
+    0xD1, 0xED, 0x4A, 0x75, 0x05, 0xAD, 0x89, 0xC5,
+    0xB2, 0x10, 0xD1, 0xD1, 0x41, 0x41, 0xAC, 0xB7,
+    0xFF, 0x8A, 0xD8, 0xE9, 0x13, 0x00, 0xAD, 0x8B,
+    0xD8, 0xB1, 0x03, 0xD2, 0xEF, 0x80, 0xCF, 0xE0,
+    0x80, 0xE4, 0x07, 0x74, 0x0C, 0x88, 0xE1, 0x41,
+    0x41, 0x26, 0x8A, 0x01, 0xAA, 0xE2, 0xFA, 0xEB,
+    0xA6, 0xAC, 0x08, 0xC0, 0x74, 0x40, 0x3C, 0x01,
+    0x74, 0x05, 0x88, 0xC1, 0x41, 0xEB, 0xEA, 0x89
+}, sig91 [] = {
+    0x06, 0x0E, 0x1F, 0x8B, 0x0E, 0x0C, 0x00, 0x8B,
+    0xF1, 0x4E, 0x89, 0xF7, 0x8C, 0xDB, 0x03, 0x1E,
+    0x0A, 0x00, 0x8E, 0xC3, 0xFD, 0xF3, 0xA4, 0x53,
+    0xB8, 0x2B, 0x00, 0x50, 0xCB, 0x2E, 0x8B, 0x2E,
+    0x08, 0x00, 0x8C, 0xDA, 0x89, 0xE8, 0x3D, 0x00,
+    0x10, 0x76, 0x03, 0xB8, 0x00, 0x10, 0x29, 0xC5,
+    0x29, 0xC2, 0x29, 0xC3, 0x8E, 0xDA, 0x8E, 0xC3,
+    0xB1, 0x03, 0xD3, 0xE0, 0x89, 0xC1, 0xD1, 0xE0,
+    0x48, 0x48, 0x8B, 0xF0, 0x8B, 0xF8, 0xF3, 0xA5,
+    0x09, 0xED, 0x75, 0xD8, 0xFC, 0x8E, 0xC2, 0x8E,
+    0xDB, 0x31, 0xF6, 0x31, 0xFF, 0xBA, 0x10, 0x00,
+    0xAD, 0x89, 0xC5, 0xD1, 0xED, 0x4A, 0x75, 0x05,
+    0xAD, 0x89, 0xC5, 0xB2, 0x10, 0x73, 0x03, 0xA4,
+    0xEB, 0xF1, 0x31, 0xC9, 0xD1, 0xED, 0x4A, 0x75,
+    0x05, 0xAD, 0x89, 0xC5, 0xB2, 0x10, 0x72, 0x22,
+    0xD1, 0xED, 0x4A, 0x75, 0x05, 0xAD, 0x89, 0xC5,
+    0xB2, 0x10, 0xD1, 0xD1, 0xD1, 0xED, 0x4A, 0x75,
+    0x05, 0xAD, 0x89, 0xC5, 0xB2, 0x10, 0xD1, 0xD1,
+    0x41, 0x41, 0xAC, 0xB7, 0xFF, 0x8A, 0xD8, 0xE9,
+    0x13, 0x00, 0xAD, 0x8B, 0xD8, 0xB1, 0x03, 0xD2,
+    0xEF, 0x80, 0xCF, 0xE0, 0x80, 0xE4, 0x07, 0x74,
+    0x0C, 0x88, 0xE1, 0x41, 0x41, 0x26, 0x8A, 0x01,
+    0xAA, 0xE2, 0xFA, 0xEB, 0xA6, 0xAC, 0x08, 0xC0,
+    0x74, 0x34, 0x3C, 0x01, 0x74, 0x05, 0x88, 0xC1,
+    0x41, 0xEB, 0xEA, 0x89, 0xFB, 0x83, 0xE7, 0x0F,
+    0x81, 0xC7, 0x00, 0x20, 0xB1, 0x04, 0xD3, 0xEB,
+    0x8C, 0xC0, 0x01, 0xD8, 0x2D, 0x00, 0x02, 0x8E,
+    0xC0, 0x89, 0xF3, 0x83, 0xE6, 0x0F, 0xD3, 0xEB,
+    0x8C, 0xD8, 0x01, 0xD8, 0x8E, 0xD8, 0xE9, 0x72
+}, sigbuf [sizeof sig90];
 
 /* EXE header test (is it LZEXE file?) */
 int rdhead(FILE *ifile ,int *ver){
-    if(fread(ihead,sizeof ihead[0],0x10,ifile)!=0x10)
-        return FAILURE;
-    memcpy(ohead,ihead,sizeof ihead[0] * 0x10);
-    if(ihead[0]!=0x5a4d || ihead[4]!=2 || ihead[0x0d]!=0)
-        return FAILURE;
-    if(ihead[0x0c]==0x1c && memcmp(&ihead[0x0e],"LZ09",4)==0){
-        *ver=90; return SUCCESS ;
-    }
-    if(ihead[0x0c]==0x1c && memcmp(&ihead[0x0e],"LZ91",4)==0){
-        *ver=91; return SUCCESS ;
-    }
+    long entry; 	/* v0.8 */
+/* v0.7 old code */
+/*  if(fread(ihead,sizeof ihead[0],0x10,ifile)!=0x10)
+ *      return FAILURE;
+ *  memcpy(ohead,ihead,sizeof ihead[0] * 0x10);
+ *  if(ihead[0]!=0x5a4d || ihead[4]!=2 || ihead[0x0d]!=0)
+ *      return FAILURE;
+ *  if(ihead[0x0c]==0x1c && memcmp(&ihead[0x0e],"LZ09",4)==0){
+ *      *ver=90; return SUCCESS ;
+ *  }
+ *  if(ihead[0x0c]==0x1c && memcmp(&ihead[0x0e],"LZ91",4)==0){
+ *      *ver=91; return SUCCESS ;
+ *  }
+ */
+    if (fread (ihead, 1, sizeof ihead, ifile) != sizeof ihead)	     /* v0.8 */
+	return FAILURE; 					     /* v0.8 */
+    memcpy (ohead, ihead, sizeof ohead);			     /* v0.8 */
+    if((ihead [0] != 0x5a4d && ihead [0] != 0x4d5a) ||		     /* v0.8 */
+       ihead [0x0d] != 0 || ihead [0x0c] != 0x1c)		     /* v0.8 */
+	return FAILURE; 					     /* v0.8 */
+    entry = ((long) (ihead [4] + ihead[0x0b]) << 4) + ihead[0x0a];   /* v0.8 */
+    if (fseek (ifile, entry, SEEK_SET) != 0)			     /* v0.8 */
+	return FAILURE; 					     /* v0.8 */
+    if (fread (sigbuf, 1, sizeof sigbuf, ifile) != sizeof sigbuf)    /* v0.8 */
+	return FAILURE; 					     /* v0.8 */
+    if (memcmp (sigbuf, sig90, sizeof sigbuf) == 0) {		     /* v0.8 */
+	*ver = 90;						     /* v0.8 */
+	return SUCCESS; 					     /* v0.8 */
+    }								     /* v0.8 */
+    if (memcmp (sigbuf, sig91, sizeof sigbuf) == 0) {		     /* v0.8 */
+	*ver = 91;						     /* v0.8 */
+	return SUCCESS; 					     /* v0.8 */
+    }								     /* v0.8 */
     return FAILURE;
 }
 
@@ -219,14 +336,16 @@ int mkreltbl(FILE *ifile,FILE *ofile,int ver) {
     long fpos;
     int i;
 
-    allocsize=((ihead[1]+16-1)>>4) + ((ihead[2]-1)<<5) - ihead[4] + ihead[5];
+/* v0.7 old code
+ *  allocsize=((ihead[1]+16-1)>>4) + ((ihead[2]-1)<<5) - ihead[4] + ihead[5];
+ */
     fpos=(long)(ihead[0x0b]+ihead[4])<<4;		/* goto CS:0000 */
     fseek(ifile,fpos,SEEK_SET);
     fread(inf, sizeof inf[0], 0x08, ifile);
-    ohead[0x0a]=inf[0];		/* IP */
-    ohead[0x0b]=inf[1];		/* CS */
-    ohead[0x08]=inf[2];		/* SP */
-    ohead[0x07]=inf[3];		/* SS */
+    ohead[0x0a]=inf[0]; 	/* IP */
+    ohead[0x0b]=inf[1]; 	/* CS */
+    ohead[0x08]=inf[2]; 	/* SP */
+    ohead[0x07]=inf[3]; 	/* SS */
     /* inf[4]:size of compressed load module (PARAGRAPH)*/
     /* inf[5]:increase of load module size (PARAGRAPH)*/
     /* inf[6]:size of decompressor with  compressed relocation table (BYTE) */
@@ -245,9 +364,13 @@ int mkreltbl(FILE *ifile,FILE *ofile,int ver) {
         return (FAILURE);
     }
     fpos=ftell(ofile);
-    i=fpos & 0x1ff;
-    if(i) i=0x200-i;
-    ohead[4]=(fpos+i)>>4;
+/* v0.7 old code
+ *  i= (int) fpos & 0x1ff;
+ *  if(i) i=0x200-i;
+ *  ohead[4]= (int) (fpos+i)>>4;
+ */
+    i= (0x200 - (int) fpos) & 0x1ff;	/* v0.7 */
+    ohead[4]= (int) ((fpos+i)>>4);	/* v0.7 */
 
     for( ; i>0; i--)
         putc(0, ofile);
@@ -283,7 +406,7 @@ int reloc91(FILE *ifile,FILE *ofile,long fpos) {
     WORD rel_seg,rel_off;
 
     fseek(ifile,fpos+0x158,SEEK_SET);
-    				/* 0x158=compressed relocation table address */
+                                /* 0x158=compressed relocation table address */
     rel_off=0; rel_seg=0;
     for(;;) {
         if (feof(ifile) || ferror(ifile) || ferror(ofile)) return(FAILURE);
@@ -326,7 +449,7 @@ int unpack(FILE *ifile,FILE *ofile){
     bitstream bits;
     static BYTE data[0x4500], *p=data;
 
-    fpos=(long)(ihead[0x0b]-inf[4]+ihead[4])<<4;
+    fpos=((long)ihead[0x0b]-(long)inf[4]+(long)ihead[4])<<4;
     fseek(ifile,fpos,SEEK_SET);
     fpos=(long)ohead[4]<<4;
     fseek(ofile,fpos,SEEK_SET);
@@ -367,8 +490,9 @@ int unpack(FILE *ifile,FILE *ofile){
                     len++;
             }
         }
-        for( ;len>0;len--,p++)
+        for( ;len>0;len--,p++){
             *p=*(p+(int16_t)span);
+        }
     }
     if(p!=data)
         fwrite(data,sizeof data[0],p-data,ofile);
@@ -380,15 +504,16 @@ int unpack(FILE *ifile,FILE *ofile){
 /* write EXE header*/
 void wrhead(FILE *ofile) {
     if(ihead[6]!=0) {
-        ohead[5]=allocsize-((loadsize+16-1)>>4);
+        ohead[5]-= inf[5] + ((inf[6]+16-1)>>4) + 9;     /* v0.7 */
         if(ihead[6]!=0xffff)
             ohead[6]-=(ihead[5]-ohead[5]);
     }
-    ohead[1]=(loadsize+(ohead[4]<<4)) & 0x1ff;
-    ohead[2]=(loadsize+(ohead[4]<<4)+0x1ff) >>9;
+    ohead[1]=((WORD)loadsize+(ohead[4]<<4)) & 0x1ff;    /* v0.7 */
+    ohead[2]=(WORD)((loadsize+((long)ohead[4]<<4)+0x1ff) >> 9); /* v0.7 */
     fseek(ofile,0L,SEEK_SET);
     fwrite(ohead,sizeof ohead[0],0x0e,ofile);
 }
+
 
 /*-------------------------------------------*/
 
