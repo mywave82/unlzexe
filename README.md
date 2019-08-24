@@ -16,5 +16,7 @@ LZEXE was written by Fabrice Bellard, fabrice.bellard at free.fr.
 ## References
 
 https://bellard.org/lzexe.html
+
 https://bellard.org/lzexe/lzexe91e.zip
+
 https://github.com/thbar/demomaking/blob/master/tools/unlzexe/UNLZEXE.C
