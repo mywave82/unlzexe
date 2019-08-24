@@ -1,4 +1,4 @@
-#define VERSION "0.8"
+#define VERSION "0.9"
 /*
 * unlzexe ver 0.5 (PC-VAN UTJ44266 Kou )
 *   UNLZEXE converts the compressed file by lzexe(ver.0.90,0.91) to the
@@ -28,6 +28,13 @@ v0.8  Vesselin Bontchev, bontchev@fbihh.informatik.uni-hamburg.de, Aug 92
     are recognized.
     Recognition of compressed files made more robust - now just
     patching the 'LZ90' and 'LZ91' strings will not fool the program.
+
+v0.9  Stian Skjelstad, stian.skjelstad@gmail.com, Aug 2019
+    Use memmove when memory-regions overlap
+    Do not use putw/getw, since they on modern systems do not read/write 16bit
+    getc() return char, which might be signed.
+    Include POSIX headers
+    span + pointer, was expected to wrap 16bit
 */
 
 #include <stdlib.h>
@@ -45,10 +52,10 @@ v0.8  Vesselin Bontchev, bontchev@fbihh.informatik.uni-hamburg.de, Aug 92
 #define FILENAME_MAX MAXPATH
 */
 #else
-#include <stdint.h>
-typedef uint16_t WORD;
-typedef uint8_t BYTE;
-#define stricmp strcasecmp
+#include <stdint.h>        /* v0.9 */
+typedef uint16_t WORD;     /* v0.9 */
+typedef uint8_t BYTE;      /* v0.9 */
+#define stricmp strcasecmp /* v0.9 */
 #endif
 
 #define FAILURE 1
@@ -387,11 +394,11 @@ int reloc90(FILE *ifile,FILE *ofile,long fpos) {
     rel_seg=0;
     do{
         if(feof(ifile) || ferror(ifile) || ferror(ofile)) return(FAILURE);
-        fread (&c, 2, 1, ifile);
+        fread (&c, 2, 1, ifile);            /* v0.9 */
         for(;c>0;c--) {
-            fread (&rel_off, 2, 1, ifile);
-            fwrite (&rel_off, 2, 1, ofile);
-            fwrite (&rel_seg, 2, 1, ofile);
+            fread (&rel_off, 2, 1, ifile);  /* v0.9 */
+            fwrite (&rel_off, 2, 1, ofile); /* v0.9 */
+            fwrite (&rel_seg, 2, 1, ofile); /* v0.9 */
             rel_count++;
         }
         rel_seg += 0x1000;
@@ -410,8 +417,8 @@ int reloc91(FILE *ifile,FILE *ofile,long fpos) {
     rel_off=0; rel_seg=0;
     for(;;) {
         if (feof(ifile) || ferror(ifile) || ferror(ofile)) return(FAILURE);
-        if((span=(BYTE)getc(ifile))==0) {
-            fread(&span, 2, 1, ifile);
+        if((span=(BYTE)getc(ifile))==0) { /* v0.9 */
+            fread(&span, 2, 1, ifile);    /* v0.9 */
             if(span==0){
                 rel_seg += 0x0fff;
                 continue;
@@ -422,8 +429,8 @@ int reloc91(FILE *ifile,FILE *ofile,long fpos) {
         rel_off += span;
         rel_seg += (rel_off & ~0x0f)>>4;
         rel_off &= 0x0f;
-        fwrite(&rel_off, 2, 1, ofile);
-        fwrite(&rel_seg, 2, 1, ofile);
+        fwrite(&rel_off, 2, 1, ofile);   /* v0.9 */
+        fwrite(&rel_seg, 2, 1, ofile);   /* v0.9 */
         rel_count++;
     }
     ohead[3]=rel_count;
@@ -461,25 +468,25 @@ int unpack(FILE *ifile,FILE *ofile){
         if(p-data>0x4000){
             fwrite(data,sizeof data[0],0x2000,ofile);
             p-=0x2000;
-            memcpy(data,data+0x2000,p-data);
+            memmove(data,data+0x2000,p-data);  /* v0.9 */
             putchar('.');
         }
         if(getbit(&bits)) {
-            *p++=(BYTE)getc(ifile);
+            *p++=(BYTE)getc(ifile);            /* v0.9 */
             continue;
         }
         if(!getbit(&bits)) {
             len=getbit(&bits)<<1;
             len |= getbit(&bits);
             len += 2;
-            span=(BYTE)getc(ifile) | 0xff00;
+            span=(BYTE)getc(ifile) | 0xff00;   /* v0.9 */
         } else {
             span=(BYTE)getc(ifile);
-            len=(BYTE)getc(ifile);
+            len=(BYTE)getc(ifile);             /* v0.9 */
             span |= ((len & ~0x07)<<5) | 0xe000;
             len = (len & 0x07)+2;
             if (len==2) {
-                len=(BYTE)getc(ifile);
+                len=(BYTE)getc(ifile);         /* v0.9 */
 
                 if(len==0)
                     break;    /* end mark of compreesed load module */
@@ -491,7 +498,7 @@ int unpack(FILE *ifile,FILE *ofile){
             }
         }
         for( ;len>0;len--,p++){
-            *p=*(p+(int16_t)span);
+            *p=*(p+(int16_t)span);             /* v0.9 */
         }
     }
     if(p!=data)
@@ -521,7 +528,7 @@ void wrhead(FILE *ofile) {
 void initbits(bitstream *p,FILE *filep){
     p->fp=filep;
     p->count=0x10;
-    fread(&p->buf, 2, 1, p->fp);
+    fread(&p->buf, 2, 1, p->fp);     /* v0.9 */
     /* printf("%04x ",p->buf); */
 }
 
@@ -529,7 +536,7 @@ int getbit(bitstream *p) {
     int b;
     b = p->buf & 1;
     if(--p->count == 0){
-        fread(&p->buf, 2, 1, p->fp);
+        fread(&p->buf, 2, 1, p->fp); /* v0.9 */
         /* printf("%04x ",p->buf); */
         p->count= 0x10;
     }else
