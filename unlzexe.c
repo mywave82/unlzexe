@@ -8,13 +8,14 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
-#include <dos.h>
 #define FAILURE 1
 #define SUCCESS 0
 
-typedef unsigned int WORD;
-typedef unsigned char BYTE;
+typedef uint16_t WORD;
+typedef uint8_t BYTE;
+#define stricmp strcasecmp
 
 int isjapan(void);
 int japan_f;
@@ -26,18 +27,19 @@ char ipath[FILENAME_MAX],
      opath[FILENAME_MAX],
      ofname[13];
 
+int fnamechk(char*,char*,char*,int,char**);
+int fnamechg(char*,char*,char*,int);
+int rdhead(FILE *,int *);
+int mkreltbl(FILE *,FILE *,int);
+int unpack(FILE *,FILE *);
+void wrhead(FILE *);
+int reloc90();
+int reloc91();
 
-main(int argc,char **argv){
-    int fnamechk(char*,char*,char*,int,char**);
-    int  fnamechg(char*,char*,char*,int);
-    int rdhead(FILE *,int *);
-    int mkreltbl(FILE *,FILE *,int);
-    int unpack(FILE *,FILE *);
-    void wrhead(FILE *);
-    
+int main(int argc,char **argv){
     FILE *ifile,*ofile;
     int  ver,rename_sw=0;
-    
+
     printf("UNLZEXE Ver. 0.5\n");
     japan_f=isjapan();
     if(argc!=3 && argc!=2){
@@ -53,7 +55,7 @@ main(int argc,char **argv){
         printf("'%s' :not found\n",ipath);
             exit(EXIT_FAILURE);
     }
-    
+
     if(rdhead(ifile,&ver)!=SUCCESS){
         printf("'%s' is not LZEXE file.\n",ipath);
         fclose(ifile); exit(EXIT_FAILURE);
@@ -82,7 +84,7 @@ main(int argc,char **argv){
     fclose(ifile);
     wrhead(ofile);
     fclose(ofile);
-        
+
     if(fnamechg(ipath,opath,ofname,rename_sw)!=SUCCESS){
         exit(EXIT_FAILURE);
     }
@@ -97,7 +99,7 @@ void parsepath(char *pathname, int *fname, int *ext);
 int fnamechk(char *ipath,char *opath, char *ofname,
               int argc,char **argv) {
     int idx_name,idx_ext;
-    
+
     strcpy(ipath,argv[1]);
     parsepath(ipath,&idx_name,&idx_ext);
     if (! ipath[idx_ext]) strcpy(ipath+idx_ext,".exe");
@@ -124,7 +126,7 @@ int fnamechk(char *ipath,char *opath, char *ofname,
 int fnamechg(char *ipath,char *opath,char *ofname,int rename_sw) {
     int idx_name,idx_ext;
     char tpath[FILENAME_MAX];
-    
+
     if(rename_sw) {
         strcpy(tpath,ipath);
         parsepath(tpath,&idx_name,&idx_ext);
@@ -150,7 +152,7 @@ int fnamechg(char *ipath,char *opath,char *ofname,int rename_sw) {
         }
         printf("can't make '%s'.  unpacked file '%s' is remained.\n",
                  tpath, tmpfname);
-        
+
         return(FAILURE);
     }
     printf("unpacked file '%s' is generated.\n",tpath);
@@ -158,25 +160,28 @@ int fnamechg(char *ipath,char *opath,char *ofname,int rename_sw) {
 }
 
 int isjapan() {
+/*
     union REGS r;
     struct SREGS rs;
     BYTE buf[34];
-    
+
     segread(&rs);
     rs.ds=rs.ss;  r.x.dx=(WORD)buf;
     r.h.al=0x3800;
     intdosx(&r,&r,&rs);
     return(!strcmp(buf+2,"\\"));
+*/
+    return 0;
 }
 
 void parsepath(char *pathname, int *fname, int *ext) {
     /* use  int japan_f */
     char c;
     int i;
-    
+
     *fname=0; *ext=0;
     for(i=0;c=pathname[i];i++) {
-        if(japan_f && iskanji(c)) 
+        if(japan_f && iskanji(c))
             i++;
         else
             switch(c) {
@@ -211,11 +216,9 @@ int rdhead(FILE *ifile ,int *ver){
 
 /* make relocation table */
 int mkreltbl(FILE *ifile,FILE *ofile,int ver) {
-    int reloc90();
-    int reloc91();
     long fpos;
     int i;
-    
+
     allocsize=((ihead[1]+16-1)>>4) + ((ihead[2]-1)<<5) - ihead[4] + ihead[5];
     fpos=(long)(ihead[0x0b]+ihead[4])<<4;		/* goto CS:0000 */
     fseek(ifile,fpos,SEEK_SET);
@@ -245,7 +248,7 @@ int mkreltbl(FILE *ifile,FILE *ofile,int ver) {
     i=fpos & 0x1ff;
     if(i) i=0x200-i;
     ohead[4]=(fpos+i)>>4;
-    
+
     for( ; i>0; i--)
         putc(0, ofile);
     return(SUCCESS);
@@ -256,16 +259,16 @@ int reloc90(FILE *ifile,FILE *ofile,long fpos) {
     WORD rel_count=0;
     WORD rel_seg,rel_off;
 
-    fseek(ifile,fpos+0x19d,SEEK_SET); 
+    fseek(ifile,fpos+0x19d,SEEK_SET);
     				/* 0x19d=compressed relocation table address */
     rel_seg=0;
     do{
         if(feof(ifile) || ferror(ifile) || ferror(ofile)) return(FAILURE);
-        c=getw(ifile);
+        fread (&c, 2, 1, ifile);
         for(;c>0;c--) {
-            rel_off=getw(ifile);
-            putw(rel_off,ofile);
-            putw(rel_seg,ofile);
+            fread (&rel_off, 2, 1, ifile);
+            fwrite (&rel_off, 2, 1, ofile);
+            fwrite (&rel_seg, 2, 1, ofile);
             rel_count++;
         }
         rel_seg += 0x1000;
@@ -283,9 +286,9 @@ int reloc91(FILE *ifile,FILE *ofile,long fpos) {
     				/* 0x158=compressed relocation table address */
     rel_off=0; rel_seg=0;
     for(;;) {
-        if(feof(ifile) || ferror(ifile) || ferror(ofile)) return(FAILURE);
-        if((span=getc(ifile))==0) {
-            span=getw(ifile);
+        if (feof(ifile) || ferror(ifile) || ferror(ofile)) return(FAILURE);
+        if((span=(BYTE)getc(ifile))==0) {
+            fread(&span, 2, 1, ifile);
             if(span==0){
                 rel_seg += 0x0fff;
                 continue;
@@ -296,8 +299,8 @@ int reloc91(FILE *ifile,FILE *ofile,long fpos) {
         rel_off += span;
         rel_seg += (rel_off & ~0x0f)>>4;
         rel_off &= 0x0f;
-        putw(rel_off,ofile);
-        putw(rel_seg,ofile);
+        fwrite(&rel_off, 2, 1, ofile);
+        fwrite(&rel_seg, 2, 1, ofile);
         rel_count++;
     }
     ohead[3]=rel_count;
@@ -318,11 +321,11 @@ int getbit(bitstream *);
 /* decompressor routine */
 int unpack(FILE *ifile,FILE *ofile){
     int len;
-    int span;
+    WORD span;
     long fpos;
     bitstream bits;
     static BYTE data[0x4500], *p=data;
-    
+
     fpos=(long)(ihead[0x0b]-inf[4]+ihead[4])<<4;
     fseek(ifile,fpos,SEEK_SET);
     fpos=(long)ohead[4]<<4;
@@ -339,21 +342,21 @@ int unpack(FILE *ifile,FILE *ofile){
             putchar('.');
         }
         if(getbit(&bits)) {
-            *p++=getc(ifile);
+            *p++=(BYTE)getc(ifile);
             continue;
         }
         if(!getbit(&bits)) {
             len=getbit(&bits)<<1;
             len |= getbit(&bits);
             len += 2;
-            span=getc(ifile) | 0xff00;
+            span=(BYTE)getc(ifile) | 0xff00;
         } else {
             span=(BYTE)getc(ifile);
-            len=getc(ifile);
+            len=(BYTE)getc(ifile);
             span |= ((len & ~0x07)<<5) | 0xe000;
-            len = (len & 0x07)+2; 
+            len = (len & 0x07)+2;
             if (len==2) {
-                len=getc(ifile);
+                len=(BYTE)getc(ifile);
 
                 if(len==0)
                     break;    /* end mark of compreesed load module */
@@ -364,9 +367,8 @@ int unpack(FILE *ifile,FILE *ofile){
                     len++;
             }
         }
-        for( ;len>0;len--,p++){
-            *p=*(p+span);
-        }
+        for( ;len>0;len--,p++)
+            *p=*(p+(int16_t)span);
     }
     if(p!=data)
         fwrite(data,sizeof data[0],p-data,ofile);
@@ -394,7 +396,7 @@ void wrhead(FILE *ofile) {
 void initbits(bitstream *p,FILE *filep){
     p->fp=filep;
     p->count=0x10;
-    p->buf=getw(filep);
+    fread(&p->buf, 2, 1, p->fp);
     /* printf("%04x ",p->buf); */
 }
 
@@ -402,11 +404,11 @@ int getbit(bitstream *p) {
     int b;
     b = p->buf & 1;
     if(--p->count == 0){
-        (p->buf)=getw(p->fp);
+        fread(&p->buf, 2, 1, p->fp);
         /* printf("%04x ",p->buf); */
         p->count= 0x10;
     }else
         p->buf >>= 1;
-    
+
     return b;
 }
